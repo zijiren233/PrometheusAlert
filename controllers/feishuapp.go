@@ -102,12 +102,23 @@ func GetAccessToken(logsign string) (string, error) {
 	return resp_json.TenantAccessToken, nil
 }
 
-func PostToFeiShuApp(title, text, receiveIds, logsign string) string {
+func PostToFeiShuApp(title, text, receiveIds, urgentPhoneOpenIds, logsign string) string {
 	open := beego.AppConfig.String("open-feishuapp")
 	if open != "1" {
 		logs.Info(logsign, "[feishuapp]", "飞书APP接口未配置未开启状态,请先配置open-feishuapp为1")
 		return "飞书APP接口未配置未开启状态,请先配置open-feishuapp为1"
 	}
+
+	// 校验：如果配置了紧急电话，receiveIds 只能是单个
+	if urgentPhoneOpenIds != "" && receiveIds != "" {
+		ReceiveIds := strings.Split(receiveIds, ",")
+		if len(ReceiveIds) > 1 {
+			errMsg := "配置错误：当启用紧急电话功能时(urgent_phone_openids不为空)，接收人(receiveIds/at参数)只能指定一个人，不能是多个"
+			logs.Error(logsign, "[feishuapp]", errMsg)
+			return errMsg
+		}
+	}
+
 	var color string
 	if strings.Count(text, "resolved") > 0 && strings.Count(text, "firing") > 0 {
 		color = "orange"
@@ -123,6 +134,7 @@ func PostToFeiShuApp(title, text, receiveIds, logsign string) string {
 	}
 	SendContent := text
 	var result []byte
+	var lastMessageId string
 	if receiveIds != "" {
 		ReceiveIds := strings.Split(receiveIds, ",")
 		fsAppContent :=
@@ -210,15 +222,121 @@ func PostToFeiShuApp(title, text, receiveIds, logsign string) string {
 				logs.Error(logsign, "[feishuapp]", err.Error())
 			}
 			defer resp.Body.Close()
-			result, err = ioutil.ReadAll(resp.Body)
+			msgResult, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				logs.Error(logsign, "[feishuapp]", title+": "+err.Error())
 			}
 			models.AlertToCounter.WithLabelValues("feishuapp").Add(1)
 			ChartsJson.Feishu += 1
-			logs.Info(logsign, "[feishuapp]", title+": "+string(result))
-			//return string(result)
+			logs.Info(logsign, "[feishuapp]", title+": "+string(msgResult))
+
+			// 解析 message_id 用于紧急电话功能
+			type MsgResponse struct {
+				Code int `json:"code"`
+				Data struct {
+					MessageId string `json:"message_id"`
+				} `json:"data"`
+			}
+			var msgResp MsgResponse
+			if err := json.Unmarshal(msgResult, &msgResp); err == nil && msgResp.Code == 0 && msgResp.Data.MessageId != "" {
+				lastMessageId = msgResp.Data.MessageId
+			}
+
+			result = msgResult
 		}
 	}
+
+	// 如果指定了紧急电话人员，则发送紧急电话
+	if urgentPhoneOpenIds != "" && lastMessageId != "" {
+		err := sendFeiShuUrgentPhone(token, lastMessageId, urgentPhoneOpenIds, logsign)
+		if err != nil {
+			logs.Warn(logsign, "[feishuapp] 紧急电话发送失败: "+err.Error())
+			return string(result) + "\n紧急电话发送失败: " + err.Error()
+		}
+		logs.Info(logsign, "[feishuapp] 紧急电话发送成功")
+	}
+
 	return string(result)
+}
+
+// sendFeiShuUrgentPhone 发送飞书紧急电话
+func sendFeiShuUrgentPhone(token, messageId, urgentPhoneOpenIds, logsign string) error {
+	// 解析紧急电话 open ids
+	openIdList := strings.Split(urgentPhoneOpenIds, ",")
+	var cleanedOpenIds []string
+	for _, openId := range openIdList {
+		openId = strings.TrimSpace(openId)
+		if openId != "" {
+			cleanedOpenIds = append(cleanedOpenIds, openId)
+		}
+	}
+
+	if len(cleanedOpenIds) == 0 {
+		return errors.New("no valid urgent_phone_openids provided")
+	}
+
+	urgentPhoneReq := struct {
+		UserIdList []string `json:"user_id_list"`
+	}{
+		UserIdList: cleanedOpenIds,
+	}
+
+	b := new(bytes.Buffer)
+	json.NewEncoder(b).Encode(urgentPhoneReq)
+	logs.Info(logsign, "[feishuapp] 紧急电话请求: "+b.String())
+
+	var tr *http.Transport
+	if proxyUrl := beego.AppConfig.String("proxy"); proxyUrl != "" {
+		proxy := func(_ *http.Request) (*url.URL, error) {
+			return url.Parse(proxyUrl)
+		}
+		tr = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			Proxy:           proxy,
+		}
+	} else {
+		tr = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+
+	client := &http.Client{Transport: tr}
+	fsUrl := fmt.Sprintf("https://open.feishu.cn/open-apis/im/v1/messages/%s/urgent_phone", messageId)
+	req, err := http.NewRequest("PATCH", fsUrl, b)
+	if err != nil {
+		logs.Error(logsign, "[feishuapp]", err.Error())
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		logs.Error(logsign, "[feishuapp]", err.Error())
+		return err
+	}
+	defer resp.Body.Close()
+
+	result, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		logs.Error(logsign, "[feishuapp]", err.Error())
+		return err
+	}
+
+	logs.Info(logsign, "[feishuapp] 紧急电话响应: "+string(result))
+
+	urgentPhoneResp := struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}{}
+	err = json.Unmarshal(result, &urgentPhoneResp)
+	if err != nil {
+		return err
+	}
+
+	if urgentPhoneResp.Code != 0 {
+		return fmt.Errorf("code: %d, msg: %s", urgentPhoneResp.Code, urgentPhoneResp.Msg)
+	}
+
+	return nil
 }

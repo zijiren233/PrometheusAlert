@@ -76,10 +76,7 @@ type PrometheusAlertMsg struct {
 	RoundRobin           string
 	Split                string
 	WebhookContentType   string
-	FsUrgentPhoneAppId     string
-	FsUrgentPhoneAppSecret string
-	FsUrgentPhoneSendTo    string
-	FsUrgentPhoneOpenIds   string
+	FsUrgentPhoneOpenIds string
 }
 
 func (c *PrometheusAlertController) PrometheusAlert() {
@@ -133,9 +130,6 @@ func (c *PrometheusAlertController) PrometheusAlert() {
 	pMsg.Fsurl = checkURL(agMap["fsurl"], c.Input().Get("fsurl"), beego.AppConfig.String("fsurl"))
 	pMsg.Email = checkURL(agMap["email"], c.Input().Get("email"), beego.AppConfig.String("email"))
 	pMsg.GroupId = checkURL(agMap["groupid"], c.Input().Get("groupid"), beego.AppConfig.String("BDRL_ID"))
-	pMsg.FsUrgentPhoneAppId = checkURL(agMap["fsurgentphoneappid"], c.Input().Get("appid"), beego.AppConfig.String("FS_URGENT_PHONE_APPID"))
-	pMsg.FsUrgentPhoneAppSecret = checkURL(agMap["fsurgentphoneappsecret"], c.Input().Get("appsecret"), beego.AppConfig.String("FS_URGENT_PHONE_APPSECRET"))
-	pMsg.FsUrgentPhoneSendTo = checkURL(agMap["fsurgentphonesendto"], c.Input().Get("sendto"), beego.AppConfig.String("FS_URGENT_PHONE_SENDTO"))
 	pMsg.FsUrgentPhoneOpenIds = c.Input().Get("urgent_phone_openids")
 
 	pMsg.Phone = checkURL(agMap["phone"], c.Input().Get("phone"))
@@ -548,13 +542,10 @@ func SendMessagePrometheusAlert(message string, pmsg *PrometheusAlertMsg, logsig
 		ReturnMsg += SendVoice(message, logsign)
 	//飞书APP渠道
 	case "fsapp":
-		ReturnMsg += PostToFeiShuApp(Title, message, pmsg.AtSomeOne, logsign)
+		ReturnMsg += PostToFeiShuApp(Title, message, pmsg.AtSomeOne, pmsg.FsUrgentPhoneOpenIds, logsign)
 	//kafka渠道
 	case "kafka":
 		ReturnMsg += SendKafka(message, logsign)
-	//飞书紧急电话渠道
-	case "fs-urgent-phone":
-		ReturnMsg += PostToFSUrgentPhone(Title, message, pmsg.FsUrgentPhoneAppId, pmsg.FsUrgentPhoneAppSecret, pmsg.FsUrgentPhoneSendTo, pmsg.FsUrgentPhoneOpenIds, logsign)
 	//异常参数
 	default:
 		ReturnMsg = "参数错误"
